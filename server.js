@@ -34,6 +34,7 @@ app.use(cors({
     "https://carole-accommodative-rogelio.ngrok-free.dev",
     "https://focasadmin.netlify.app",
     "https://lms.focasedu.com",
+    "https://focas-lms-app.vercel.app",
     "https://focas-student-lms-app.vercel.app",
     "https://focas-admin-app.vercel.app",
     "https://lms-server-zeta-three.vercel.app",
