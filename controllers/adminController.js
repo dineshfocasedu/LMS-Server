@@ -8,6 +8,8 @@ import User from "../models/User.js"
 import InventoryLog from "../models/InventoryLog.js"
 import AccountsEntry from "../models/AccountsEntry.js"
 import { recordPurchase } from "../services/accessService.js"
+import { bustProductsCache } from "./purchaseController.js"
+import { clearProductCache } from "./contentController.js"
 
 /**
  * POST /api/admin/products
@@ -27,7 +29,7 @@ import { recordPurchase } from "../services/accessService.js"
  */
 export async function createProduct(req, res) {
   try {
-    const { name, description, price, originalPrice, shopifyPrice, comboPrice, imageUrl, shopifyProductId, category, subCategory, level, weight, shipToHome, isCourse, grants, stock, showInComboStore } = req.body;
+    const { name, description, price, originalPrice, shopifyPrice, comboPrice, imageUrl, shopifyProductId, category, subCategory, level, weight, shipToHome, isCourse, grants, stock, showInComboStore, isBundle, bundleItems } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: 'name is required' });
@@ -35,6 +37,15 @@ export async function createProduct(req, res) {
 
     if (shipToHome && (!weight || Number(weight) <= 0)) {
       return res.status(400).json({ error: 'Weight (grams) is required for ShipToHome products' });
+    }
+
+    if (isBundle) {
+      if (!Array.isArray(bundleItems) || bundleItems.length === 0) {
+        return res.status(400).json({ error: 'A bundle must have at least one item' });
+      }
+      for (const bi of bundleItems) {
+        if (!bi.name?.trim()) return res.status(400).json({ error: 'Each bundle item must have a name' });
+      }
     }
 
     const product = await Product.create({
@@ -59,6 +70,13 @@ export async function createProduct(req, res) {
       },
       stock: stock != null ? stock : null,
       showInComboStore: showInComboStore ?? false,
+      isBundle: isBundle ?? false,
+      bundleItems: isBundle ? (bundleItems || []).map(bi => ({
+        product_id: bi.product_id || null,
+        name:       bi.name.trim(),
+        price:      Number(bi.price) || 0,
+        isCustom:   bi.isCustom ?? false,
+      })) : [],
     });
 
     // Log initial stock as restock if stock was provided
@@ -73,6 +91,7 @@ export async function createProduct(req, res) {
       });
     }
 
+    bustProductsCache();
     res.status(201).json({ success: true, product });
   } catch (err) {
     if (err.code === 11000) {
@@ -89,7 +108,7 @@ export async function createProduct(req, res) {
  */
 export async function updateProduct(req, res) {
   try {
-    const { name, description, price, originalPrice, shopifyPrice, comboPrice, imageUrl, shopifyProductId, category, subCategory, level, weight, shipToHome, isCourse, grants, stock, stockNote, showInComboStore } = req.body;
+    const { name, description, price, originalPrice, shopifyPrice, comboPrice, imageUrl, shopifyProductId, category, subCategory, level, weight, shipToHome, isCourse, grants, stock, stockNote, showInComboStore, isBundle, bundleItems } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (description !== undefined) updates.description = description;
@@ -110,6 +129,20 @@ export async function updateProduct(req, res) {
       courses: grants.courses || [],
       features: grants.features || [],
     };
+    if (isBundle !== undefined) {
+      if (isBundle && Array.isArray(bundleItems)) {
+        for (const bi of bundleItems) {
+          if (!bi.name?.trim()) return res.status(400).json({ error: 'Each bundle item must have a name' });
+        }
+      }
+      updates.isBundle = isBundle;
+      updates.bundleItems = isBundle ? (bundleItems || []).map(bi => ({
+        product_id: bi.product_id || null,
+        name:       bi.name.trim(),
+        price:      Number(bi.price) || 0,
+        isCustom:   bi.isCustom ?? false,
+      })) : [];
+    }
 
     // Fetch current product for stock tracking and shipToHome/weight validation
     const current = await Product.findById(req.params.id).select('stock weight shipToHome').lean();
@@ -148,6 +181,7 @@ export async function updateProduct(req, res) {
       });
     }
 
+    bustProductsCache();
     res.json({ success: true, product });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -162,6 +196,7 @@ export async function deleteProduct(req, res) {
     const product = await Product.findByIdAndDelete(req.params.id);
     if (!product) return res.status(404).json({ error: 'Product not found' });
 
+    bustProductsCache();
     res.json({ success: true, message: 'Product deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -181,20 +216,30 @@ export async function listProducts(req, res) {
     const filter = req.query.filter || 'all';
 
     const query = {};
-    if (filter === 'catalog') query.isCustom = { $ne: true };
+    if (filter === 'catalog') { query.isCustom = { $ne: true }; query.isBundle = { $ne: true }; }
     if (filter === 'custom')  query.isCustom = true;
+    if (filter === 'bundle')  query.isBundle = true;
 
-    const [products, total, catalogCount, customCount] = await Promise.all([
+    // One aggregation for all counts instead of 4 separate countDocuments calls
+    const [products, [counts]] = await Promise.all([
       Product.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
-      Product.countDocuments(query),
-      Product.countDocuments({ isCustom: { $ne: true } }),
-      Product.countDocuments({ isCustom: true }),
+      Product.aggregate([{ $group: {
+        _id: null,
+        total:    { $sum: 1 },
+        catalog:  { $sum: { $cond: [{ $and: [{ $ne: ['$isCustom', true] }, { $ne: ['$isBundle', true] }] }, 1, 0] } },
+        custom:   { $sum: { $cond: ['$isCustom', 1, 0] } },
+        bundle:   { $sum: { $cond: ['$isBundle',  1, 0] } },
+      }}]),
     ]);
+    const total        = filter === 'all' ? (counts?.total   || 0) : await Product.countDocuments(query);
+    const catalogCount = counts?.catalog || 0;
+    const customCount  = counts?.custom  || 0;
+    const bundleCount  = counts?.bundle  || 0;
 
     res.json({
       products,
       pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
-      counts: { catalog: catalogCount, custom: customCount },
+      counts: { catalog: catalogCount, custom: customCount, bundle: bundleCount },
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -489,6 +534,26 @@ export async function getUser(req, res) {
  * GET /api/admin/students/:id/progress
  * Admin view of a student's video watch progress.
  */
+/**
+ * PUT /api/admin/products/:id/content-access
+ * Set which CA levels and subjects this product grants access to.
+ */
+const CA_LEVELS_VALID = ['Foundation', 'Intermediate', 'Final']
+export async function updateProductContentAccess(req, res) {
+  const { levels = [], subjectIds = [] } = req.body
+  const validLevels     = levels.filter(l => CA_LEVELS_VALID.includes(l))
+  const validSubjectIds = subjectIds.filter(id => mongoose.Types.ObjectId.isValid(id))
+
+  const product = await Product.findByIdAndUpdate(
+    req.params.id,
+    { contentAccess: { levels: validLevels, subjectIds: validSubjectIds } },
+    { new: true }
+  )
+  if (!product) return res.status(404).json({ error: 'Not found' })
+  clearProductCache(req.params.id)
+  res.json({ ok: true, contentAccess: product.contentAccess })
+}
+
 export async function getStudentProgress(req, res) {
   try {
     const VideoProgress = (await import('../models/VideoProgress.js')).default

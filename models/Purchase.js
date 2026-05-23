@@ -86,8 +86,19 @@ const purchaseSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
-// One document per order per user
+// Uniqueness
 purchaseSchema.index({ userId: 1, orderId: 1, source: 1 }, { unique: true });
+
+// List / filter queries (admin purchase list)
+purchaseSchema.index({ createdAt: -1 });
+purchaseSchema.index({ source: 1, createdAt: -1 });
+purchaseSchema.index({ status: 1, createdAt: -1 });
+purchaseSchema.index({ hasPhysicalItem: 1, createdAt: -1 });
+purchaseSchema.index({ fulfillmentStatus: 1, createdAt: -1 });
+purchaseSchema.index({ 'shipment.awb': 1 }, { sparse: true });
+
+// HOT PATH: access check on every video play
+purchaseSchema.index({ userId: 1, status: 1, 'items.productId': 1 });
 
 const Purchase = mongoose.model('Purchase', purchaseSchema);
 export default Purchase;

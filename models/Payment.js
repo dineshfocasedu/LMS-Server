@@ -30,9 +30,15 @@ const paymentSchema = new mongoose.Schema(
 
     // Products included in this payment link (one or many)
     products: [{
-      product_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
-      name:       { type: String, required: true },
-      price:      { type: Number, required: true },
+      product_id:   { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
+      name:         { type: String, required: true },
+      price:        { type: Number, required: true },
+      is_bundle:    { type: Boolean, default: false },
+      bundle_items: [{
+        product_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
+        name:       { type: String },
+        _id:        false,
+      }],
       _id: false,
     }],
 

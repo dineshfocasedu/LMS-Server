@@ -7,8 +7,10 @@ import Purchase from "../models/Purchase.js";
 import InventoryLog from "../models/InventoryLog.js";
 import AccountsEntry from "../models/AccountsEntry.js";
 import Settings from "../models/Settings.js";
-import { sendLowStockAlert } from "../services/watiService.js";
+import { sendLowStockAlert, sendOrderWelcome } from "../services/watiService.js";
 import { normalizePhone } from "../services/accessService.js";
+
+const WELCOME_TEMPLATE = process.env.WELCOME_TEMPLATE_NAME || 'order_welcome';
 
 const KEY_ID         = process.env.RAZORPAY_KEY_ID;
 const KEY_SECRET     = process.env.RAZORPAY_KEY_SECRET;
@@ -78,7 +80,35 @@ async function getSettings() {
   return _settingsCache;
 }
 
+// Decrement a single product's stock and write an inventory log entry.
+async function _decrementOne(productId, orderId, note, threshold, alertPhones) {
+  const product = await Product.findById(productId);
+  if (!product || product.stock == null) return; // not tracked
+
+  const stockBefore = product.stock;
+  const stockAfter  = stockBefore - 1;
+
+  await Product.findByIdAndUpdate(productId, { $set: { stock: stockAfter } });
+
+  await InventoryLog.create({
+    productId:      productId,
+    sku:            product.productId || null,
+    type:           "sale",
+    quantityChange: -1,
+    stockBefore,
+    stockAfter,
+    orderId:        orderId.toString(),
+    note,
+  });
+
+  if (alertPhones.length > 0 && stockAfter <= threshold) {
+    sendLowStockAlert(product.name, stockAfter, alertPhones).catch(() => {});
+  }
+}
+
 // Decrement stock for each product that has inventory tracking enabled.
+// Always reads the Product model live to detect bundles — works for both old
+// and new payment records, regardless of whether is_bundle was stored.
 async function decrementInventory(products, orderId) {
   const settings = await getSettings();
   const threshold = settings?.lowStockThreshold ?? 5;
@@ -87,28 +117,32 @@ async function decrementInventory(products, orderId) {
   for (const item of products) {
     if (!item.product_id) continue;
 
-    const product = await Product.findById(item.product_id);
-    if (!product || product.stock == null) continue; // not tracked
+    // Always look up the product so we get its current isBundle status
+    const prod = await Product.findById(item.product_id).lean();
+    if (!prod) continue;
 
-    const stockBefore = product.stock;
-    const stockAfter  = stockBefore - 1;
-
-    await Product.findByIdAndUpdate(item.product_id, { $set: { stock: stockAfter } });
-
-    await InventoryLog.create({
-      productId:      item.product_id,
-      sku:            product.productId || null,
-      type:           "sale",
-      quantityChange: -1,
-      stockBefore,
-      stockAfter,
-      orderId:        orderId.toString(),
-      note:           "Custom payment link sale",
-    });
-
-    // Send low stock WhatsApp alert (non-blocking)
-    if (alertPhones.length > 0 && stockAfter <= threshold) {
-      sendLowStockAlert(product.name, stockAfter, alertPhones).catch(() => {});
+    if (prod.isBundle) {
+      // Bundle: decrement each component product that has inventory tracking.
+      // Never decrement the bundle product itself.
+      const components = (prod.bundleItems || []).filter(bi => bi.product_id);
+      for (const bi of components) {
+        await _decrementOne(
+          bi.product_id,
+          orderId,
+          `Bundle sale: ${prod.name}`,
+          threshold,
+          alertPhones,
+        );
+      }
+    } else {
+      // Regular / custom product: decrement its own stock.
+      await _decrementOne(
+        item.product_id,
+        orderId,
+        "Custom payment link sale",
+        threshold,
+        alertPhones,
+      );
     }
   }
 }
@@ -376,13 +410,40 @@ export async function createPaymentLink(req, res) {
         const prod = await Product.findById(item.product_id).lean();
         if (!prod) return res.status(400).json({ error: `Product not found: ${item.product_id}` });
         if ((prod.weight || 0) > 0) hasWeightForDelivery = true;
-        resolvedItems.push({
-          product_id: prod._id,
-          name:       prod.name,
-          price:      item.price,
-        });
-        for (const c of (prod.grants?.courses  || [])) if (!autoGrantCourses.includes(c))  autoGrantCourses.push(c);
-        for (const f of (prod.grants?.features || [])) if (!autoGrantFeatures.includes(f)) autoGrantFeatures.push(f);
+
+        if (prod.isBundle && prod.bundleItems?.length) {
+          // Expand bundle: collect bundle component IDs for inventory tracking
+          const bundleGrantItems = [];
+          for (const bi of prod.bundleItems) {
+            bundleGrantItems.push({ product_id: bi.product_id || null, name: bi.name });
+            if (bi.product_id) {
+              const biProd = await Product.findById(bi.product_id).select('grants weight').lean();
+              if (biProd) {
+                if ((biProd.weight || 0) > 0) hasWeightForDelivery = true;
+                for (const c of (biProd.grants?.courses  || [])) if (!autoGrantCourses.includes(c))  autoGrantCourses.push(c);
+                for (const f of (biProd.grants?.features || [])) if (!autoGrantFeatures.includes(f)) autoGrantFeatures.push(f);
+              }
+            }
+          }
+          // Also collect grants defined at the bundle level itself
+          for (const c of (prod.grants?.courses  || [])) if (!autoGrantCourses.includes(c))  autoGrantCourses.push(c);
+          for (const f of (prod.grants?.features || [])) if (!autoGrantFeatures.includes(f)) autoGrantFeatures.push(f);
+          resolvedItems.push({
+            product_id:   prod._id,
+            name:         prod.name,
+            price:        item.price,
+            is_bundle:    true,
+            bundle_items: bundleGrantItems,
+          });
+        } else {
+          resolvedItems.push({
+            product_id: prod._id,
+            name:       prod.name,
+            price:      item.price,
+          });
+          for (const c of (prod.grants?.courses  || [])) if (!autoGrantCourses.includes(c))  autoGrantCourses.push(c);
+          for (const f of (prod.grants?.features || [])) if (!autoGrantFeatures.includes(f)) autoGrantFeatures.push(f);
+        }
       } else {
         resolvedItems.push({ product_id: null, name: item.name.trim(), price: item.price });
       }
@@ -578,6 +639,11 @@ export async function razorpayWebhook(req, res) {
 
           // Decrement stock for inventory-tracked products
           await decrementInventory(updated.products, updated._id);
+
+          // Send WhatsApp welcome message once (first payment only)
+          if (WELCOME_TEMPLATE) {
+            sendOrderWelcome(updated.phone, updated.name, WELCOME_TEMPLATE).catch(() => {});
+          }
         } catch (userErr) {
           console.error("[webhook] User/purchase setup failed (non-fatal):", userErr);
         }

@@ -8,6 +8,7 @@ import ffmpegPath from 'ffmpeg-static'
 import mongoose from 'mongoose'
 import jwt from 'jsonwebtoken'
 import Content from '../models/Content.js'
+import Subject from '../models/Subject.js'
 import Product from '../models/Product.js'
 import Purchase from '../models/Purchase.js'
 
@@ -167,13 +168,16 @@ async function uploadToBunnyStreamBg(contentId, filePath, bunnyVideoId) {
   }
 }
 
-// Poll Bunny Stream every 30s until transcoding is done (status 4) or errored (5/6).
-// 120 attempts × 30s = 60 minutes max — enough for large videos (2h+ content).
+// Poll Bunny Stream until transcoding is done (status 4) or errored (5/6).
+// Interval: 30s for first 60 attempts (30 min), then 60s after that.
+// Max: 60 attempts × 30s + 660 attempts × 60s = 30 min + 11 hr = ~12 hrs total.
 async function pollBunnyStreamStatus(contentId, bunnyVideoId, attempt = 0) {
-  if (attempt > 120) {
+  if (attempt > 720) {
     await Content.findByIdAndUpdate(contentId, { status: 'error' }).catch(() => {})
+    console.error(`❌ Bunny polling timed out after 12 hrs: ${bunnyVideoId}`)
     return
   }
+  const interval = attempt < 60 ? 30_000 : 60_000
   setTimeout(async () => {
     try {
       const { data } = await axios.get(
@@ -186,13 +190,32 @@ async function pollBunnyStreamStatus(contentId, bunnyVideoId, attempt = 0) {
         console.log(`✅ Bunny Stream ready: ${bunnyVideoId}`)
       } else if (data.status === 5 || data.status === 6) {
         await Content.findByIdAndUpdate(contentId, { status: 'error' })
+        console.error(`❌ Bunny Stream error: ${bunnyVideoId}`)
       } else {
         pollBunnyStreamStatus(contentId, bunnyVideoId, attempt + 1)
       }
     } catch {
       pollBunnyStreamStatus(contentId, bunnyVideoId, attempt + 1)
     }
-  }, 30000)
+  }, interval)
+}
+
+// Called on server startup — resumes polling for any video stuck in "processing"
+// (handles browser disconnects, crashes, or failed upload-complete calls).
+export async function resumeProcessingPolls() {
+  try {
+    const stuck = await Content.find({
+      status: 'processing',
+      bunnyVideoId: { $exists: true, $ne: null },
+    }).select('bunnyVideoId').lean()
+    if (stuck.length === 0) return
+    console.log(`🔄 Resuming polling for ${stuck.length} processing video(s)`)
+    for (const c of stuck) {
+      pollBunnyStreamStatus(c._id.toString(), c.bunnyVideoId)
+    }
+  } catch (err) {
+    console.error('resumeProcessingPolls error:', err.message)
+  }
 }
 
 // Full pipeline: faststart → Bunny upload → HLS → HLS upload. Runs after response is sent.
@@ -253,15 +276,52 @@ function parseProductIds(val) {
   return []
 }
 
+function parseSubjectIds(val) {
+  if (!val) return []
+  if (Array.isArray(val)) return val.filter(Boolean)
+  if (typeof val === 'string') return val.split(',').map(s => s.trim()).filter(Boolean)
+  return []
+}
+
+// Resolve an array of subjectIds → { subjectIds, subjectId, subject, level }
+// subject and level are taken from the first subject (primary).
+async function resolveSubjects(ids) {
+  if (!ids || ids.length === 0) return { subjectIds: [], subjectId: null, subject: '', level: null }
+  const docs = await Subject.find({ _id: { $in: ids } }).select('name level').lean()
+  if (docs.length === 0) return null // invalid ids
+  const primary = docs[0]
+  return {
+    subjectIds: docs.map(d => d._id),
+    subjectId:  primary._id,
+    subject:    primary.name,
+    level:      primary.level,
+  }
+}
+
 // POST /api/admin/content/prepare-upload
 // Creates Bunny Stream video + Content record, returns TUS credentials for direct browser upload.
 export async function prepareUpload(req, res) {
-  const { title, subject, productIds, productId, description, order, fileSize } = req.body
-  if (!title?.trim())   return res.status(400).json({ error: 'Title is required' })
-  if (!subject?.trim()) return res.status(400).json({ error: 'Subject is required' })
+  const { title, subject, subjectIds: rawSIds, productIds, productId, description, order, fileSize } = req.body
+  if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
   if (!BUNNY_STREAM_API_KEY || !BUNNY_STREAM_LIBRARY_ID) {
     return res.status(503).json({ error: 'Bunny Stream not configured' })
   }
+
+  // Resolve subjects from subjectIds array
+  const subjectIdList = parseSubjectIds(rawSIds)
+  let resolvedSubject = subject?.trim() || ''
+  let resolvedLevel   = null
+  let resolvedSubjectId = null
+  let resolvedSubjectIds = []
+  if (subjectIdList.length > 0) {
+    const resolved = await resolveSubjects(subjectIdList)
+    if (!resolved) return res.status(400).json({ error: 'One or more invalid subjectIds' })
+    resolvedSubject    = resolved.subject
+    resolvedLevel      = resolved.level
+    resolvedSubjectId  = resolved.subjectId
+    resolvedSubjectIds = resolved.subjectIds
+  }
+  if (!resolvedSubject) return res.status(400).json({ error: 'At least one subject is required' })
 
   const resolvedProductIds = parseProductIds(productIds).length
     ? parseProductIds(productIds)
@@ -292,7 +352,10 @@ export async function prepareUpload(req, res) {
     title: title.trim(),
     description: description?.trim() || '',
     type: 'video',
-    subject: subject.trim(),
+    subject: resolvedSubject,
+    subjectId: resolvedSubjectId,
+    subjectIds: resolvedSubjectIds,
+    level: resolvedLevel,
     productIds: resolvedProductIds,
     productId: null,
     storagePath: `stream/${bunnyVideoId}`,
@@ -329,9 +392,24 @@ export async function markUploadComplete(req, res) {
 export async function uploadContent(req, res) {
   if (!req.file) return res.status(400).json({ error: 'No file provided' })
 
-  const { title, subject, productIds: rawPIds, productId, description, order } = req.body
-  if (!title?.trim())   return res.status(400).json({ error: 'Title is required' })
-  if (!subject?.trim()) return res.status(400).json({ error: 'Subject is required' })
+  const { title, subject, subjectIds: rawSIds, productIds: rawPIds, productId, description, order } = req.body
+  if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
+
+  // Resolve subjects from subjectIds array
+  const subjectIdList = parseSubjectIds(rawSIds)
+  let resolvedSubject    = subject?.trim() || ''
+  let resolvedLevel      = null
+  let resolvedSubjectId  = null
+  let resolvedSubjectIds = []
+  if (subjectIdList.length > 0) {
+    const resolved = await resolveSubjects(subjectIdList)
+    if (!resolved) return res.status(400).json({ error: 'One or more invalid subjectIds' })
+    resolvedSubject    = resolved.subject
+    resolvedLevel      = resolved.level
+    resolvedSubjectId  = resolved.subjectId
+    resolvedSubjectIds = resolved.subjectIds
+  }
+  if (!resolvedSubject) return res.status(400).json({ error: 'At least one subject is required' })
 
   const resolvedProductIds = parseProductIds(rawPIds).length
     ? parseProductIds(rawPIds)
@@ -348,7 +426,7 @@ export async function uploadContent(req, res) {
   }
 
   const folder      = type === 'video' ? 'videos' : 'docs'
-  const subjSlug    = slugify(subject.trim())
+  const subjSlug    = slugify(resolvedSubject)
   const safeName    = path.basename(req.file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_')
   const storagePath = `${folder}/${subjSlug}/${Date.now()}_${safeName}`
   const uploadUrl   = `${BUNNY_ENDPOINT}/${BUNNY_ZONE}/${storagePath}`
@@ -369,7 +447,8 @@ export async function uploadContent(req, res) {
 
     const content = await Content.create({
       title: title.trim(), description: description?.trim() || '',
-      type, subject: subject.trim(), productIds: resolvedProductIds, productId: null,
+      type, subject: resolvedSubject, subjectId: resolvedSubjectId, subjectIds: resolvedSubjectIds, level: resolvedLevel,
+      productIds: resolvedProductIds, productId: null,
       storagePath, url: `${BUNNY_CDN_URL}/${storagePath}`,
       size: req.file.size, order: parseInt(order) || 0,
       uploadedBy: req.user?.id, status: 'ready',
@@ -396,7 +475,8 @@ export async function uploadContent(req, res) {
 
     const content = await Content.create({
       title: title.trim(), description: description?.trim() || '',
-      type, subject: subject.trim(), productIds: resolvedProductIds, productId: null,
+      type, subject: resolvedSubject, subjectId: resolvedSubjectId, subjectIds: resolvedSubjectIds, level: resolvedLevel,
+      productIds: resolvedProductIds, productId: null,
       storagePath: `stream/${bunnyVideoId}`,
       url: `https://iframe.mediadelivery.net/embed/${BUNNY_STREAM_LIBRARY_ID}/${bunnyVideoId}`,
       bunnyVideoId,
@@ -412,7 +492,8 @@ export async function uploadContent(req, res) {
   // Fallback: Bunny Storage + ffmpeg HLS
   const content = await Content.create({
     title: title.trim(), description: description?.trim() || '',
-    type, subject: subject.trim(), productIds: resolvedProductIds, productId: null,
+    type, subject: resolvedSubject, subjectId: resolvedSubjectId, subjectIds: resolvedSubjectIds, level: resolvedLevel,
+    productIds: resolvedProductIds, productId: null,
     storagePath, url: `${BUNNY_CDN_URL}/${storagePath}`,
     size: req.file.size, order: parseInt(order) || 0,
     uploadedBy: req.user?.id, status: 'processing',
@@ -425,53 +506,102 @@ export async function uploadContent(req, res) {
   processVideoBackground(content._id.toString(), req.file.path, uploadUrl, subjSlug).catch(() => {})
 }
 
-// GET /api/admin/content?subject=&productId=&type=&page=&limit=
+// GET /api/admin/content?subject=&subjectId=&level=&productId=&type=&page=&limit=
 export async function listContent(req, res) {
-  const { subject, productId, type, search, page = 1, limit = 20 } = req.query
-  const filter = {}
-  if (subject) filter.subject = { $regex: subject, $options: 'i' }
-  if (productId) filter.$or = [{ productIds: productId }, { productId: productId }]
-  if (type && ['video','pdf'].includes(type)) filter.type = type
-  if (search) filter.title = { $regex: search, $options: 'i' }
+  const { subject, subjectId, level, productId, type, search, page = 1, limit = 20 } = req.query
+
+  // Build filter using $and so each clause is independent (avoids $or conflicts)
+  const and = []
+
+  if (subjectId) {
+    and.push({ $or: [{ subjectIds: subjectId }, { subjectId: subjectId }] })
+  } else if (subject) {
+    and.push({ subject: { $regex: subject, $options: 'i' } })
+  }
+
+  if (level) {
+    // Find every subject belonging to this level, then match content that has ANY of them.
+    // This is correct when one video is assigned to subjects across multiple levels.
+    const levelSubjectIds = await Subject.find({ level }).select('_id').lean().then(s => s.map(x => x._id))
+    and.push({ $or: [
+      { subjectIds: { $in: levelSubjectIds } },
+      { subjectId:  { $in: levelSubjectIds } },
+      { level },   // fallback for old records that only have the denormalised level string
+    ]})
+  }
+
+  if (productId) {
+    and.push({ $or: [{ productIds: productId }, { productId: productId }] })
+  }
+  if (type && ['video','pdf'].includes(type)) and.push({ type })
+  if (search) and.push({ title: { $regex: search, $options: 'i' } })
+
+  const filter = and.length ? { $and: and } : {}
 
   const [items, total] = await Promise.all([
     Content.find(filter)
-      .sort({ subject: 1, order: 1, createdAt: -1 })
+      .sort({ level: 1, subject: 1, order: 1, createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(+limit)
+      .populate('subjectIds', 'name level order')
+      .populate('subjectId',  'name level order')
       .populate('productIds', 'name level')
-      .populate('productId', 'name level'),
+      .populate('productId',  'name level'),
     Content.countDocuments(filter),
   ])
 
   const data = items.map(c => {
     const obj = c.toObject()
-    // merge legacy productId into productIds for the response
-    const legacyArr = obj.productId ? [obj.productId] : []
-    const merged = [...(obj.productIds || []), ...legacyArr].filter((p, _, arr) => {
+    // merge legacy productId into productIds
+    const legacyProduct = obj.productId ? [obj.productId] : []
+    const mergedProducts = [...(obj.productIds || []), ...legacyProduct].filter((p, _, arr) => {
       const key = String(p._id || p)
-      const first = arr.findIndex(x => String(x._id || x) === key)
-      return arr.indexOf(p) === first
+      return arr.findIndex(x => String(x._id || x) === key) === arr.indexOf(p)
     })
-    return { ...obj, productIds: merged, sizeLabel: fmtSize(c.size) }
+    // merge legacy subjectId into subjectIds
+    const legacySubject = obj.subjectId && !obj.subjectIds?.some(s => String(s._id || s) === String(obj.subjectId._id || obj.subjectId))
+      ? [obj.subjectId] : []
+    const mergedSubjects = [...(obj.subjectIds || []), ...legacySubject]
+    return { ...obj, productIds: mergedProducts, subjectIds: mergedSubjects, sizeLabel: fmtSize(c.size) }
   })
   res.json({ content: data, total, page: +page, pages: Math.ceil(total / limit) })
 }
 
-// GET /api/admin/content/subjects  — unique subject list
-export async function listSubjects(_req, res) {
-  const subjects = await Content.distinct('subject')
-  res.json({ subjects: subjects.sort() })
+// GET /api/admin/content/subjects  — subjects from Subject collection (grouped by level)
+export async function listSubjects(req, res) {
+  const { level } = req.query
+  const filter = {}
+  if (level) filter.level = level
+  const subjects = await Subject.find(filter).sort({ level: 1, order: 1, name: 1 })
+  res.json({ subjects })
 }
 
 // PUT /api/admin/content/:id
 export async function updateContent(req, res) {
-  const { title, description, subject, productIds: rawPIds, productId, order, isActive, bunnyVideoId, status } = req.body
+  const { title, description, subject, subjectIds: rawSIds, productIds: rawPIds, productId, order, isActive, bunnyVideoId, status } = req.body
   const update = {}
-  if (title         !== undefined) update.title       = title.trim()
-  if (description   !== undefined) update.description = description.trim()
-  if (subject       !== undefined) update.subject     = subject.trim()
-  if (rawPIds       !== undefined) {
+  if (title       !== undefined) update.title       = title.trim()
+  if (description !== undefined) update.description = description.trim()
+
+  // If subjectIds is being updated, resolve names and level from Subject
+  if (rawSIds !== undefined) {
+    const idList = parseSubjectIds(rawSIds)
+    if (idList.length > 0) {
+      const resolved = await resolveSubjects(idList)
+      if (!resolved) return res.status(400).json({ error: 'One or more invalid subjectIds' })
+      update.subjectIds = resolved.subjectIds
+      update.subjectId  = resolved.subjectId
+      update.subject    = resolved.subject
+      update.level      = resolved.level
+    } else {
+      update.subjectIds = []
+      update.subjectId  = null
+    }
+  } else if (subject !== undefined) {
+    update.subject = subject.trim()
+  }
+
+  if (rawPIds !== undefined) {
     update.productIds = parseProductIds(rawPIds)
     update.productId  = null
   } else if (productId !== undefined) {
@@ -489,9 +619,11 @@ export async function updateContent(req, res) {
   }
   if (status !== undefined) update.status = status
 
-  _contentCache.clear()  // Invalidate cached content lists when content changes
+  _contentCache.clear()
 
   const content = await Content.findByIdAndUpdate(req.params.id, update, { new: true })
+    .populate('subjectIds', 'name level order')
+    .populate('subjectId',  'name level order')
     .populate('productIds', 'name level')
   if (!content) return res.status(404).json({ error: 'Not found' })
   res.json({ content })
@@ -785,10 +917,31 @@ export async function getPublicContent(req, res) {
       const items = subject ? cached.data.filter(c => c.subject === subject) : cached.data
       return res.json({ content: items })
     }
+
+    // Build access $or: direct per-video assignment + product-level contentAccess grants
+    const accessOr = [
+      { productIds: productId },
+      { productId: productId },
+    ]
+    const product = await Product.findById(productId).select('contentAccess').lean()
+    if (product?.contentAccess?.subjectIds?.length) {
+      accessOr.push({ subjectIds: { $in: product.contentAccess.subjectIds } })
+      accessOr.push({ subjectId:  { $in: product.contentAccess.subjectIds } })
+    }
+    if (product?.contentAccess?.levels?.length) {
+      const levelSubjectIds = await Subject.find({ level: { $in: product.contentAccess.levels } })
+        .select('_id').lean().then(s => s.map(x => x._id))
+      if (levelSubjectIds.length) {
+        accessOr.push({ subjectIds: { $in: levelSubjectIds } })
+        accessOr.push({ subjectId:  { $in: levelSubjectIds } })
+      }
+      accessOr.push({ level: { $in: product.contentAccess.levels } })
+    }
+
     const dbItems = await Content.find({
       isActive: true,
       status: { $ne: 'processing' },
-      $or: [{ productIds: productId }, { productId: productId }],
+      $or: accessOr,
     }).sort({ order: 1, createdAt: 1 })
       .select('title description type subject url size order createdAt')
       .lean()
@@ -805,4 +958,8 @@ export async function getPublicContent(req, res) {
     .select('title description type subject url size order createdAt')
     .lean()
   res.json({ content: items })
+}
+
+export function clearProductCache(productId) {
+  _contentCache.delete(String(productId))
 }

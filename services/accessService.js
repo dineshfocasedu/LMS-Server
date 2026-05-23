@@ -3,6 +3,8 @@ import User from "../models/User.js"
 import Purchase from "../models/Purchase.js"
 import Product from "../models/Product.js"
 import InventoryLog from "../models/InventoryLog.js"
+import Settings from "../models/Settings.js"
+import { sendLowStockAlert, sendWebsitePurchaseConfirmation, sendComboPurchaseConfirmation } from "./watiService.js"
 
 // Normalize phone to last 10 digits only
 export function normalizePhone(phone) {
@@ -159,34 +161,59 @@ export async function recordPurchase({ userId, products, source, orderId, curren
     { upsert: true }
   );
 
-  // Atomically reduce stock for each product that has stock tracking enabled.
-  // Uses findOneAndUpdate with $inc so concurrent purchases never double-decrement.
+  // Reduce stock for each product (or each bundle component) that has stock tracking enabled.
+  // isNew guard ensures idempotency — retries for the same order never double-decrement.
   if (isNew) {
+    const settings = await Settings.findById('global').lean().catch(() => null);
+    const threshold   = settings?.lowStockThreshold ?? 5;
+    const alertPhones = settings?.alertPhones || [];
+
+    const decrementOne = async (productId, note) => {
+      const prod = await Product.findById(productId).lean();
+      if (!prod || prod.stock == null) return; // not tracked
+      const stockBefore = prod.stock;
+      const stockAfter  = stockBefore - 1;
+      await Product.findByIdAndUpdate(productId, { $set: { stock: stockAfter } });
+      await InventoryLog.create({
+        productId: prod._id,
+        type: 'sale',
+        quantityChange: -1,
+        stockBefore,
+        stockAfter,
+        orderId,
+        note,
+      });
+      if (alertPhones.length > 0 && stockAfter <= threshold) {
+        sendLowStockAlert(prod.name, stockAfter, alertPhones).catch(() => {});
+      }
+    };
+
     await Promise.allSettled(
       productList.map(async (p) => {
-        // Atomic decrement — always fire for tracked products (stock can go negative)
-        const updated = await Product.findOneAndUpdate(
-          { _id: p.productId, stock: { $ne: null } },
-          { $inc: { stock: -1 } },
-          { new: false } // returns the doc *before* the update (stockBefore)
-        );
-
-        if (!updated) return; // stock is null → not tracked, skip
-
-        const stockBefore = updated.stock;
-        const stockAfter  = stockBefore - 1;
-
-        await InventoryLog.create({
-          productId:      updated._id,
-          type:           'sale',
-          quantityChange: -1,
-          stockBefore,
-          stockAfter,
-          orderId,
-          note:           `${source} order`,
-        });
+        const prod = await Product.findById(p.productId).lean();
+        if (!prod) return;
+        if (prod.isBundle) {
+          // Bundle: decrement each component that has stock tracking — never the bundle itself
+          const components = (prod.bundleItems || []).filter(bi => bi.product_id);
+          for (const bi of components) {
+            await decrementOne(bi.product_id, `Bundle sale: ${prod.name} (${source} order)`);
+          }
+        } else {
+          await decrementOne(p.productId, `${source} order`);
+        }
       })
     );
+
+    // Send WhatsApp purchase confirmation to the customer
+    // website → order_confirmation_website (has {{1}} name param)
+    // combo   → order_conformation_custom  (no params, fixed text)
+    if (customerPhone) {
+      if (source === 'website') {
+        sendWebsitePurchaseConfirmation(customerPhone, customerName).catch(() => {});
+      } else if (source === 'combo') {
+        sendComboPurchaseConfirmation(customerPhone, customerName).catch(() => {});
+      }
+    }
   }
 
   await updateUserAccess(userId);

@@ -17,11 +17,16 @@ let _productsCache = null;
 let _productsCacheAt = 0;
 const PRODUCTS_TTL = 2 * 60_000;
 
+// Call this whenever a product is created, updated, or deleted in admin.
+export function bustProductsCache() {
+  _productsCache = null;
+}
+
 async function getCachedProducts() {
   if (_productsCache && Date.now() - _productsCacheAt < PRODUCTS_TTL) return _productsCache;
   _productsCache = await Product.find(
     { showInComboStore: true },
-    'name description price shopifyPrice comboPrice originalPrice imageUrl category subCategory level isCourse shipToHome stock grants'
+    'name description price shopifyPrice comboPrice originalPrice imageUrl category subCategory level isCourse shipToHome stock grants isBundle bundleItems'
   ).sort({ createdAt: -1 }).lean();
   _productsCacheAt = Date.now();
   return _productsCache;

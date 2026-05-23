@@ -3,6 +3,7 @@ import 'dotenv/config'
 import express from "express"
 import mongoose from "mongoose"
 import cors from "cors"
+import { resumeProcessingPolls } from "./controllers/contentController.js"
 import authRoutes from "./routes/auth.js"
 import shopifyRoutes from "./routes/shopify.js"
 import purchaseRoutes from "./routes/purchase.js"
@@ -35,16 +36,11 @@ app.use(cors({
     "https://carole-accommodative-rogelio.ngrok-free.dev",
     "https://focasadmin.netlify.app",
     "https://lms.focasedu.com",
-    "https://focas-lms-app.vercel.app",
     "https://focas-student-lms-app.vercel.app",
     "https://focas-admin-app.vercel.app",
-    "https://lms-server-zeta-three.vercel.app",
     "https://focas-admin-lms-app.vercel.app",
     "https://focas-custom-product-app.vercel.app",
     "https://compile-wrongly-deceiver.ngrok-free.dev",
-    "https://lms-admin-app-pearl.vercel.app",
-    "https://lms-admin-app-focas.vercel.app",
-    "https://lms-admin-app-pearl.vercel.app", 
     "https://focasedu.com"
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -77,6 +73,7 @@ app.use((err, _req, res, next) => {
 mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/focas')
   .then(() => {
     console.log('✅ MongoDB Connected');
+    resumeProcessingPolls();
   })
   .catch(err => console.error('❌ MongoDB Error:', err));
 

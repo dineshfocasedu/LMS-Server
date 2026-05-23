@@ -57,6 +57,156 @@ export async function sendLowStockAlert(productName, currentStock, alertPhones =
 }
 
 /**
+ * Sends an order welcome WhatsApp template on first payment.
+ * Template name is configurable; no parameters assumed (template is fixed text).
+ *
+ * @param {string} phone        - customer phone, e.g. "7305504500" or "917305504500"
+ * @param {string} name         - customer name (sent as {{1}} if template uses it)
+ * @param {string} templateName - Wati template name, e.g. "order_welcome"
+ */
+export async function sendOrderWelcome(phone, name, templateName) {
+  if (!WATI_BASE_URL || !WATI_API_TOKEN) {
+    console.warn('⚠️  WATI credentials not set — skipping order welcome message');
+    return;
+  }
+  if (!templateName) return;
+
+  // Normalise: ensure country code prefix
+  let normalised = phone.replace(/\D/g, '');
+  if (normalised.length === 10) normalised = '91' + normalised;
+  const whatsappNumber = '+' + normalised;
+
+  const url = `${WATI_BASE_URL}/api/v1/sendTemplateMessage?whatsappNumber=${encodeURIComponent(whatsappNumber)}`;
+
+  const body = {
+    template_name:   templateName,
+    broadcast_name:  templateName,
+    parameters:      [],  //{ name: '1', value: name || 'Student' } only avalable if template has {{1}} parameter
+    channel_number:  '916383514285',
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        accept: '*/*',
+        Authorization: `Bearer ${WATI_API_TOKEN}`,
+        'Content-Type': 'application/json-patch+json',
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      console.error(`❌ WATI ${templateName} failed [${response.status}] to ${whatsappNumber}:`, data);
+    } else {
+      console.log(`✅ WATI ${templateName} sent to ${whatsappNumber}`);
+    }
+  } catch (err) {
+    console.error(`❌ WATI ${templateName} request error:`, err.message);
+  }
+}
+
+/**
+ * Website purchase confirmation — template: order_confirmation_website
+ * Has {{1}} = customer name parameter.
+ *
+ * @param {string} phone - customer phone, e.g. "7305504500" or "917305504500"
+ * @param {string} name  - customer name sent as {{1}}
+ */
+export async function sendWebsitePurchaseConfirmation(phone, name) {
+  if (!WATI_BASE_URL || !WATI_API_TOKEN) {
+    console.warn('⚠️  WATI credentials not set — skipping website purchase confirmation');
+    return;
+  }
+  if (!phone) return;
+
+  let normalised = phone.replace(/\D/g, '');
+  if (normalised.length === 10) normalised = '91' + normalised;
+  const whatsappNumber = '+' + normalised;
+
+  const url = `${WATI_BASE_URL}/api/v1/sendTemplateMessage?whatsappNumber=${encodeURIComponent(whatsappNumber)}`;
+
+  const body = {
+    template_name:  'order_confirmation_website',
+    broadcast_name: 'order_confirmation_website',
+    parameters: [
+      { name: 'name', value: name || 'Student' },
+    ],
+    channel_number: '916383514285',
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        accept: '*/*',
+        Authorization: `Bearer ${WATI_API_TOKEN}`,
+        'Content-Type': 'application/json-patch+json',
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      console.error(`❌ WATI order_confirmation_website failed [${response.status}] to ${whatsappNumber}:`, data);
+    } else {
+      console.log(`✅ WATI order_confirmation_website sent to ${whatsappNumber}`);
+    }
+  } catch (err) {
+    console.error('❌ WATI order_confirmation_website request error:', err.message);
+  }
+}
+
+/**
+ * Combo store purchase confirmation — template: order_conformation_custom
+ * Has {{name}} = customer name parameter.
+ *
+ * @param {string} phone - customer phone, e.g. "7305504500" or "917305504500"
+ * @param {string} name  - customer name sent as {{name}}
+ */
+export async function sendComboPurchaseConfirmation(phone, name) {
+  if (!WATI_BASE_URL || !WATI_API_TOKEN) {
+    console.warn('⚠️  WATI credentials not set — skipping combo purchase confirmation');
+    return;
+  }
+  if (!phone) return;
+
+  let normalised = phone.replace(/\D/g, '');
+  if (normalised.length === 10) normalised = '91' + normalised;
+  const whatsappNumber = '+' + normalised;
+
+  const url = `${WATI_BASE_URL}/api/v1/sendTemplateMessage?whatsappNumber=${encodeURIComponent(whatsappNumber)}`;
+
+  const body = {
+    template_name:  'order_conformation_custom',
+    broadcast_name: 'order_conformation_custom',
+    parameters: [
+      { name: 'name', value: name || 'Student' },
+    ],
+    channel_number: '916383514285',
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        accept: '*/*',
+        Authorization: `Bearer ${WATI_API_TOKEN}`,
+        'Content-Type': 'application/json-patch+json',
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      console.error(`❌ WATI order_conformation_custom failed [${response.status}] to ${whatsappNumber}:`, data);
+    } else {
+      console.log(`✅ WATI order_conformation_custom sent to ${whatsappNumber}`);
+    }
+  } catch (err) {
+    console.error('❌ WATI order_conformation_custom request error:', err.message);
+  }
+}
+
+/**
  * Sends the course_enroll WhatsApp template to a user.
  *
  * @param {object} params

@@ -15,6 +15,7 @@ const settingsSchema = new mongoose.Schema(
       default: [],
       validate: [(v) => v.length <= 3, "Maximum 3 alert phone numbers allowed"],
     },
+
   },
   { timestamps: true }
 );

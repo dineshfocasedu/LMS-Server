@@ -2,7 +2,7 @@
 import Settings from "../models/Settings.js";
 
 // GET /api/admin/settings
-export async function getSettings(req, res) {
+export async function getSettings(_req, res) {
   try {
     const settings = await Settings.findById("global").lean();
     res.json(
@@ -31,7 +31,6 @@ export async function updateSettings(req, res) {
         return res.status(400).json({ error: "alertPhones must be an array of up to 3 numbers" });
       update.alertPhones = alertPhones.map((p) => String(p).trim()).filter(Boolean);
     }
-
     const settings = await Settings.findByIdAndUpdate(
       "global",
       { $set: update },

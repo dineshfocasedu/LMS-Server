@@ -8,6 +8,7 @@ import {
   updateProduct,
   deleteProduct,
   listProducts,
+  updateProductContentAccess,
   listUsers,
   getUser,
   grantUserAccess,
@@ -37,6 +38,12 @@ import {
   deleteContent,
   previewContent,
 } from "../controllers/contentController.js"
+import {
+  listSubjects as listSubjectsCRUD,
+  createSubject,
+  updateSubject,
+  deleteSubject,
+} from "../controllers/subjectController.js"
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -60,6 +67,7 @@ router.get('/products', listProducts);
 router.post('/products', createProduct);
 router.put('/products/:id', updateProduct);
 router.delete('/products/:id', deleteProduct);
+router.put('/products/:id/content-access', updateProductContentAccess);
 
 // Users & Purchases
 router.get('/users',                        listUsers);
@@ -85,6 +93,12 @@ router.get('/sales/top-products', getTopProducts);    // ?dateFrom=&dateTo=&limi
 // Settings
 router.get('/settings',  getSettings);
 router.put('/settings',  updateSettings);
+
+// Subjects (structured level-wise subject management)
+router.get('/subjects',     listSubjectsCRUD);
+router.post('/subjects',    createSubject);
+router.put('/subjects/:id', updateSubject);
+router.delete('/subjects/:id', deleteSubject);
 
 // Content (videos & PDFs stored in Bunny.net)
 router.post('/content/prepare-upload',       prepareUpload);
