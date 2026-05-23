@@ -27,6 +27,7 @@ app.use(cors({
     "http://localhost:5175",
     "https://admin-focas.netlify.app",
     "https://lms-student-focas.vercel.app",
+    "https://lms-server-zeta-three.vercel.app",
     "https://lms-admin-focastech.vercel.app",
     "lms-student-dpc0q5m16-focas.vercel.app",
     "https://combo-focas.netlify.app",
