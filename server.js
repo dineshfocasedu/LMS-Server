@@ -28,6 +28,7 @@ app.use(cors({
     "https://admin-focas.netlify.app",
     "https://lms-student-focas.vercel.app",
     "https://lms-admin-focastech.vercel.app",
+    "lms-student-dpc0q5m16-focas.vercel.app",
     "https://combo-focas.netlify.app",
     "https://focas.vercel.app",
     "https://sage-douhua-668f0c.netlify.app",
