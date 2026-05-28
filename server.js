@@ -41,7 +41,11 @@ app.use(cors({
     "https://focas-admin-lms-app.vercel.app",
     "https://focas-custom-product-app.vercel.app",
     "https://compile-wrongly-deceiver.ngrok-free.dev",
-    "https://focasedu.com"
+    "https://focasedu.com",
+    "https://lms-student-focas.vercel.app",
+    "https://lms-server-zeta-three.vercel.app",
+    "https://lms-admin-focastech.vercel.app",
+    "lms-student-dpc0q5m16-focas.vercel.app"
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
