@@ -34,6 +34,7 @@ import {
   markUploadComplete,
   listContent,
   listSubjects,
+  listFolders,
   updateContent,
   deleteContent,
   previewContent,
@@ -103,9 +104,10 @@ router.delete('/subjects/:id', deleteSubject);
 // Content (videos & PDFs stored in Bunny.net)
 router.post('/content/prepare-upload',       prepareUpload);
 router.post('/content/:id/upload-complete',  markUploadComplete);
-router.post('/content/upload',   upload.single('file'), uploadContent);
+router.post('/content/upload',   upload.fields([{ name: 'file', maxCount: 1 }, { name: 'answerFile', maxCount: 1 }]), uploadContent);
 router.get('/content',           listContent);
 router.get('/content/subjects',  listSubjects);
+router.get('/content/folders',   listFolders);
 router.get('/content/:id/preview', previewContent);
 router.put('/content/:id',       updateContent);
 router.delete('/content/:id',    deleteContent);

@@ -298,10 +298,19 @@ async function resolveSubjects(ids) {
   }
 }
 
+function parseCategory(val) {
+  return ['lecture', 'question_bank', 'test_series'].includes(val) ? val : 'lecture'
+}
+
+function parseTestSeriesType(val) {
+  return ['chapter_wise', 'segment_wise', 'full_test'].includes(val) ? val : null
+}
+
 // POST /api/admin/content/prepare-upload
 // Creates Bunny Stream video + Content record, returns TUS credentials for direct browser upload.
 export async function prepareUpload(req, res) {
-  const { title, subject, subjectIds: rawSIds, productIds, productId, description, order, fileSize } = req.body
+  const { title, subject, subjectIds: rawSIds, productIds, productId, description, order, fileSize,
+          category: rawCategory, folder: rawFolder } = req.body
   if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
   if (!BUNNY_STREAM_API_KEY || !BUNNY_STREAM_LIBRARY_ID) {
     return res.status(503).json({ error: 'Bunny Stream not configured' })
@@ -347,6 +356,9 @@ export async function prepareUpload(req, res) {
     .update(BUNNY_STREAM_LIBRARY_ID + BUNNY_STREAM_API_KEY + expireTime + bunnyVideoId)
     .digest('hex')
 
+  const category = parseCategory(rawCategory)
+  const folder   = rawFolder?.trim() || ''
+
   // Create Content record immediately so it appears in the list as "processing"
   const content = await Content.create({
     title: title.trim(),
@@ -365,6 +377,7 @@ export async function prepareUpload(req, res) {
     order: parseInt(order) || 0,
     uploadedBy: req.user?._id,
     status: 'processing',
+    category, folder,
   })
 
   res.json({
@@ -390,9 +403,18 @@ export async function markUploadComplete(req, res) {
 
 // POST /api/admin/content/upload  (multipart)
 export async function uploadContent(req, res) {
-  if (!req.file) return res.status(400).json({ error: 'No file provided' })
+  // Support both multer.single('file') → req.file  and  multer.fields([...]) → req.files
+  const mainFile   = req.files?.file?.[0] ?? req.file
+  const answerFile = req.files?.answerFile?.[0] ?? null
 
-  const { title, subject, subjectIds: rawSIds, productIds: rawPIds, productId, description, order } = req.body
+  if (!mainFile) return res.status(400).json({ error: 'No file provided' })
+
+  const { title, subject, subjectIds: rawSIds, productIds: rawPIds, productId, description, order,
+          category: rawCategory, folder: rawFolder, testSeriesType: rawTSType } = req.body
+
+  const category       = parseCategory(rawCategory)
+  const folder         = rawFolder?.trim() || ''
+  const testSeriesType = category === 'test_series' ? parseTestSeriesType(rawTSType) : null
   if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
 
   // Resolve subjects from subjectIds array
@@ -415,34 +437,54 @@ export async function uploadContent(req, res) {
     ? parseProductIds(rawPIds)
     : (productId ? [productId] : [])
 
-  const mime = req.file.mimetype
+  const mime = mainFile.mimetype
   const type = mime.startsWith('video/') ? 'video'
              : mime === 'application/pdf' ? 'pdf'
              : null
 
   if (!type) {
-    fs.unlink(req.file.path, () => {})
+    fs.unlink(mainFile.path, () => {})
+    if (answerFile) fs.unlink(answerFile.path, () => {})
     return res.status(400).json({ error: 'Only video and PDF files are allowed' })
   }
 
-  const folder      = type === 'video' ? 'videos' : 'docs'
-  const subjSlug    = slugify(resolvedSubject)
-  const safeName    = path.basename(req.file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_')
-  const storagePath = `${folder}/${subjSlug}/${Date.now()}_${safeName}`
-  const uploadUrl   = `${BUNNY_ENDPOINT}/${BUNNY_ZONE}/${storagePath}`
+  const storagePrefix = type === 'video' ? 'videos' : 'docs'
+  const subjSlug      = slugify(resolvedSubject)
+  const safeName      = path.basename(mainFile.originalname).replace(/[^a-zA-Z0-9._-]/g, '_')
+  const storagePath   = `${storagePrefix}/${subjSlug}/${Date.now()}_${safeName}`
+  const uploadUrl     = `${BUNNY_ENDPOINT}/${BUNNY_ZONE}/${storagePath}`
 
   if (type === 'pdf') {
-    // PDFs are small — upload synchronously, no processing needed
+    // Upload question / main PDF synchronously
     try {
-      const fileSize = fs.statSync(req.file.path).size
-      await bunnyPut(req.file.path, uploadUrl, fileSize)
+      const fileSize = fs.statSync(mainFile.path).size
+      await bunnyPut(mainFile.path, uploadUrl, fileSize)
     } catch (err) {
-      fs.unlink(req.file.path, () => {})
+      fs.unlink(mainFile.path, () => {})
+      if (answerFile) fs.unlink(answerFile.path, () => {})
       const status = err.status
       if (status === 401) return res.status(502).json({ error: 'Bunny.net: Invalid API key (401).' })
       return res.status(502).json({ error: `Bunny upload failed (${status || 'network error'}): ${err.message}` })
     } finally {
-      fs.unlink(req.file.path, () => {})
+      fs.unlink(mainFile.path, () => {})
+    }
+
+    // Upload answer PDF if provided (test series)
+    let answerStoragePath = null, answerUrl = null, answerSize = 0
+    if (answerFile) {
+      const aSafeName = path.basename(answerFile.originalname).replace(/[^a-zA-Z0-9._-]/g, '_')
+      answerStoragePath   = `docs/${subjSlug}/answer_${Date.now()}_${aSafeName}`
+      const answerUploadUrl = `${BUNNY_ENDPOINT}/${BUNNY_ZONE}/${answerStoragePath}`
+      answerSize = answerFile.size
+      try {
+        await bunnyPut(answerFile.path, answerUploadUrl, fs.statSync(answerFile.path).size)
+        answerUrl = `${BUNNY_CDN_URL}/${answerStoragePath}`
+      } catch (err) {
+        console.warn('Answer PDF upload failed:', err.message)
+        answerStoragePath = null; answerUrl = null; answerSize = 0
+      } finally {
+        fs.unlink(answerFile.path, () => {})
+      }
     }
 
     const content = await Content.create({
@@ -450,8 +492,10 @@ export async function uploadContent(req, res) {
       type, subject: resolvedSubject, subjectId: resolvedSubjectId, subjectIds: resolvedSubjectIds, level: resolvedLevel,
       productIds: resolvedProductIds, productId: null,
       storagePath, url: `${BUNNY_CDN_URL}/${storagePath}`,
-      size: req.file.size, order: parseInt(order) || 0,
+      size: mainFile.size, order: parseInt(order) || 0,
       uploadedBy: req.user?.id, status: 'ready',
+      category, folder, testSeriesType,
+      answerStoragePath, answerUrl, answerSize,
     })
     return res.status(201).json({ content })
   }
@@ -469,7 +513,7 @@ export async function uploadContent(req, res) {
       )
       bunnyVideoId = data.guid
     } catch (err) {
-      fs.unlink(req.file.path, () => {})
+      fs.unlink(mainFile.path, () => {})
       return res.status(502).json({ error: `Bunny Stream error: ${err.message}` })
     }
 
@@ -480,12 +524,13 @@ export async function uploadContent(req, res) {
       storagePath: `stream/${bunnyVideoId}`,
       url: `https://iframe.mediadelivery.net/embed/${BUNNY_STREAM_LIBRARY_ID}/${bunnyVideoId}`,
       bunnyVideoId,
-      size: req.file.size, order: parseInt(order) || 0,
+      size: mainFile.size, order: parseInt(order) || 0,
       uploadedBy: req.user?.id, status: 'processing',
+      category, folder,
     })
 
     res.status(201).json({ content })
-    uploadToBunnyStreamBg(content._id.toString(), req.file.path, bunnyVideoId).catch(() => {})
+    uploadToBunnyStreamBg(content._id.toString(), mainFile.path, bunnyVideoId).catch(() => {})
     return
   }
 
@@ -495,20 +540,18 @@ export async function uploadContent(req, res) {
     type, subject: resolvedSubject, subjectId: resolvedSubjectId, subjectIds: resolvedSubjectIds, level: resolvedLevel,
     productIds: resolvedProductIds, productId: null,
     storagePath, url: `${BUNNY_CDN_URL}/${storagePath}`,
-    size: req.file.size, order: parseInt(order) || 0,
+    size: mainFile.size, order: parseInt(order) || 0,
     uploadedBy: req.user?.id, status: 'processing',
+    category, folder,
   })
 
-  // Respond immediately — browser gets success right away
   res.status(201).json({ content })
-
-  // Process in background (does NOT block the HTTP response)
-  processVideoBackground(content._id.toString(), req.file.path, uploadUrl, subjSlug).catch(() => {})
+  processVideoBackground(content._id.toString(), mainFile.path, uploadUrl, subjSlug).catch(() => {})
 }
 
-// GET /api/admin/content?subject=&subjectId=&level=&productId=&type=&page=&limit=
+// GET /api/admin/content?subject=&subjectId=&level=&productId=&type=&category=&folder=&page=&limit=
 export async function listContent(req, res) {
-  const { subject, subjectId, level, productId, type, search, page = 1, limit = 20 } = req.query
+  const { subject, subjectId, level, productId, type, search, category, folder, page = 1, limit = 20 } = req.query
 
   // Build filter using $and so each clause is independent (avoids $or conflicts)
   const and = []
@@ -534,6 +577,8 @@ export async function listContent(req, res) {
     and.push({ $or: [{ productIds: productId }, { productId: productId }] })
   }
   if (type && ['video','pdf'].includes(type)) and.push({ type })
+  if (category && ['lecture','question_bank','test_series'].includes(category)) and.push({ category })
+  if (folder) and.push({ folder })
   if (search) and.push({ title: { $regex: search, $options: 'i' } })
 
   const filter = and.length ? { $and: and } : {}
@@ -567,6 +612,40 @@ export async function listContent(req, res) {
   res.json({ content: data, total, page: +page, pages: Math.ceil(total / limit) })
 }
 
+// GET /api/admin/content/folders  — all distinct folders ever used, sorted by most-recently-used
+// This is independent of pagination so it works even if the folder was created months ago.
+export async function listFolders(req, res) {
+  // Single group by folder. Collect all subjectIds/productIds from every file
+  // (each file is an array, so $push builds array-of-arrays — flattened in JS).
+  const raw = await Content.aggregate([
+    { $match: { folder: { $nin: ['', null] } } },
+    { $group: {
+      _id:        '$folder',
+      subjectIds: { $push: '$subjectIds' },   // array-of-arrays, flattened below
+      productIds: { $push: '$productIds' },
+      subject:    { $first: '$subject' },
+      itemCount:  { $sum: 1 },
+      lastUsed:   { $max: '$updatedAt' },
+      cats:       { $push: '$category' },     // flat list of category strings
+    }},
+    { $sort: { lastUsed: -1 } },
+  ])
+
+  const folders = raw.map(f => ({
+    folder:       f._id,
+    subjectIds:   [...new Set(f.subjectIds.flat().map(id => String(id)).filter(Boolean))],
+    productIds:   [...new Set(f.productIds.flat().map(id => String(id)).filter(Boolean))],
+    subject:      f.subject || '',
+    itemCount:    f.itemCount,
+    lastUsed:     f.lastUsed,
+    lectures:     f.cats.filter(c => c === 'lecture').length,
+    questionBank: f.cats.filter(c => c === 'question_bank').length,
+    testSeries:   f.cats.filter(c => c === 'test_series').length,
+  }))
+
+  res.json({ folders })
+}
+
 // GET /api/admin/content/subjects  — subjects from Subject collection (grouped by level)
 export async function listSubjects(req, res) {
   const { level } = req.query
@@ -578,7 +657,8 @@ export async function listSubjects(req, res) {
 
 // PUT /api/admin/content/:id
 export async function updateContent(req, res) {
-  const { title, description, subject, subjectIds: rawSIds, productIds: rawPIds, productId, order, isActive, bunnyVideoId, status } = req.body
+  const { title, description, subject, subjectIds: rawSIds, productIds: rawPIds, productId, order, isActive, bunnyVideoId, status,
+          category: rawCategory, folder: rawFolder, testSeriesType: rawTSType } = req.body
   const update = {}
   if (title       !== undefined) update.title       = title.trim()
   if (description !== undefined) update.description = description.trim()
@@ -618,6 +698,9 @@ export async function updateContent(req, res) {
     }
   }
   if (status !== undefined) update.status = status
+  if (rawCategory !== undefined) update.category = parseCategory(rawCategory)
+  if (rawFolder   !== undefined) update.folder   = rawFolder?.trim() || ''
+  if (rawTSType   !== undefined) update.testSeriesType = parseTestSeriesType(rawTSType)
 
   _contentCache.clear()
 
@@ -630,9 +713,33 @@ export async function updateContent(req, res) {
 }
 
 // GET /api/admin/content/:id/preview  — proxies PDF/video from Bunny Storage for admin viewing
+// Pass ?part=answer to preview the answer PDF (test series only)
 export async function previewContent(req, res) {
-  const content = await Content.findById(req.params.id).select('storagePath type isActive bunnyVideoId')
+  const content = await Content.findById(req.params.id)
+    .select('storagePath type isActive bunnyVideoId answerStoragePath')
   if (!content) return res.status(404).json({ error: 'Not found' })
+
+  // Answer PDF preview
+  if (req.query.part === 'answer') {
+    if (!content.answerStoragePath) return res.status(404).json({ error: 'No answer PDF for this item' })
+    const storageUrl = `${BUNNY_ENDPOINT}/${BUNNY_ZONE}/${content.answerStoragePath}`
+    try {
+      const upstream = await axios({
+        method: 'GET', url: storageUrl,
+        headers: { AccessKey: BUNNY_API_KEY },
+        responseType: 'stream', validateStatus: () => true,
+        maxContentLength: Infinity, maxBodyLength: Infinity,
+      })
+      res.status(upstream.status)
+      res.set('Content-Type', 'application/pdf')
+      res.set('Content-Disposition', 'inline')
+      if (upstream.headers['content-length']) res.set('Content-Length', upstream.headers['content-length'])
+      res.set('Cache-Control', 'private, max-age=300')
+      return upstream.data.pipe(res)
+    } catch {
+      return res.status(502).json({ error: 'Failed to fetch answer PDF from storage' })
+    }
+  }
 
   // Bunny Stream video — serve HTML wrapper with iframe so Bunny sees a proper referer
   if (content.bunnyVideoId) {
@@ -697,6 +804,16 @@ export async function deleteContent(req, res) {
       })
     } catch (err) {
       console.warn('Bunny Storage delete warn:', err.message)
+    }
+    // Also delete answer PDF if present (test series)
+    if (content.answerStoragePath) {
+      try {
+        await axios.delete(`${BUNNY_ENDPOINT}/${BUNNY_ZONE}/${content.answerStoragePath}`, {
+          headers: { AccessKey: BUNNY_API_KEY },
+        })
+      } catch (err) {
+        console.warn('Bunny answer PDF delete warn:', err.message)
+      }
     }
   }
 
@@ -943,7 +1060,7 @@ export async function getPublicContent(req, res) {
       status: { $ne: 'processing' },
       $or: accessOr,
     }).sort({ order: 1, createdAt: 1 })
-      .select('title description type subject url size order createdAt')
+      .select('title description type subject url size order createdAt category folder testSeriesType')
       .lean()
     _contentCache.set(productId, { data: dbItems, expiresAt: Date.now() + _CONTENT_CACHE_TTL })
     const items = subject ? dbItems.filter(c => c.subject === subject) : dbItems
@@ -955,7 +1072,7 @@ export async function getPublicContent(req, res) {
   if (subject) filter.subject = subject
   const items = await Content.find(filter)
     .sort({ order: 1, createdAt: 1 })
-    .select('title description type subject url size order createdAt')
+    .select('title description type subject url size order createdAt category folder testSeriesType')
     .lean()
   res.json({ content: items })
 }

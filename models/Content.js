@@ -20,6 +20,14 @@ const contentSchema = new mongoose.Schema({
   bunnyVideoId:     { type: String, default: null },
   status:           { type: String, enum: ['processing', 'ready', 'error'], default: 'ready' },
   uploadedBy:       { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  // Content categorisation
+  category:       { type: String, enum: ['lecture', 'question_bank', 'test_series'], default: 'lecture' },
+  folder:         { type: String, default: '', trim: true },   // chapter / segment name (2nd grouping level)
+  testSeriesType: { type: String, enum: ['chapter_wise', 'segment_wise', 'full_test'], default: null },
+  // Test-series answer PDF (stored alongside question; never sent to students)
+  answerStoragePath: { type: String, default: null },
+  answerUrl:         { type: String, default: null },
+  answerSize:        { type: Number, default: 0 },
 }, { timestamps: true })
 
 contentSchema.index({ subject: 1, order: 1 })
@@ -32,5 +40,7 @@ contentSchema.index({ type: 1 })
 // Used in getPublicContent (student hot path) and resumeProcessingPolls
 contentSchema.index({ isActive: 1, status: 1 })
 contentSchema.index({ bunnyVideoId: 1 }, { sparse: true })
+contentSchema.index({ category: 1 })
+contentSchema.index({ category: 1, folder: 1 })
 
 export default mongoose.model('Content', contentSchema)
