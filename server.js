@@ -26,7 +26,7 @@ app.use(cors({
     "https://lms-accounts-admin.vercel.app",
     "https://lms-accounts-admin-git-main-focas.vercel.app",
     "https://lms-accounts-admin-n6599kmnq-focas.vercel.app",
-    "https://app.focasedu.com",,
+    "https://app.focasedu.com",
     "https://admin.focasedu.com",
     "https://lms.focasedu.com",
     "https://shop.focasedu.com",
