@@ -21,6 +21,8 @@ app.set('trust proxy', 1);
 app.use(cors({
   origin: [
     "http://localhost:8080",
+    "https://lms-student-focas.vercel.app",
+    "https://lms-admin-focastech.vercel.app",
     "https://app.focasedu.com",,
     "https://admin.focasedu.com",
     "https://lms.focasedu.com",
