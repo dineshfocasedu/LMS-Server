@@ -37,6 +37,7 @@ export async function sendOTP(phoneNumber, otp) {
         Authorization: `Bearer ${process.env.WATI_API_TOKEN}`,
         accept: "*/*",
       },
+      timeout: 8000,
     });
 
     return response.data;
@@ -53,6 +54,8 @@ export async function sendEmailOTP(email, otp) {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASS,
     },
+    connectionTimeout: 5000,
+    socketTimeout: 5000,
   });
 
   await transporter.sendMail({
@@ -61,5 +64,4 @@ export async function sendEmailOTP(email, otp) {
     subject: 'Your OTP Code',
     text: `Your OTP is ${otp}. It expires in 5 minutes.`,
   });
-   
 }
