@@ -13,10 +13,14 @@ import {
   getUser,
   grantUserAccess,
   getStudentProgress,
+  getStudentDeviceInfo,
+  getAllStudentsWithDeviceInfo,
   listPurchases,
   getPurchase,
   updatePurchaseNotes,
   initiateRefund,
+  getUserProductAccess,
+  updateProductAccess,
 } from "../controllers/adminController.js"
 import {
   getInventoryLogs,
@@ -73,8 +77,12 @@ router.put('/products/:id/content-access', updateProductContentAccess);
 // Users & Purchases
 router.get('/users',                        listUsers);
 router.get('/users/:id',                    getUser);
+router.get('/users-with-devices',           getAllStudentsWithDeviceInfo);
 router.post('/users/:id/grant-access',      grantUserAccess);
 router.get('/users/:id/progress',           getStudentProgress);
+router.get('/users/:id/device-info',        getStudentDeviceInfo);
+router.get('/users/:id/access',             getUserProductAccess);
+router.patch('/users/:id/access/:productId', updateProductAccess);
 router.get('/purchases', listPurchases);
 router.get('/purchases/:id', getPurchase);
 router.patch('/purchases/:id/notes',  updatePurchaseNotes);

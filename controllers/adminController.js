@@ -531,6 +531,99 @@ export async function getUser(req, res) {
 }
 
 /**
+ * GET /api/admin/users/:id/access
+ * Get all products a user has access to with their expiry dates.
+ */
+export async function getUserProductAccess(req, res) {
+  try {
+    const userId = req.params.id;
+    const user = await User.findById(userId).lean();
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const purchases = await Purchase.find({ userId, status: 'paid' }).lean();
+
+    const productAccess = [];
+    const now = new Date();
+
+    for (const purchase of purchases) {
+      for (const item of purchase.items) {
+        const isExpired = item.expiresAt && item.expiresAt < now;
+        const daysRemaining = item.expiresAt
+          ? Math.ceil((item.expiresAt - now) / (24 * 60 * 60 * 1000))
+          : null;
+
+        productAccess.push({
+          productId: item.productId,
+          productName: item.name,
+          purchaseId: purchase._id,
+          grantedAt: item.grantedAt,
+          expiresAt: item.expiresAt,
+          isExpired,
+          daysRemaining,
+          purchaseSource: purchase.source,
+          purchaseDate: purchase.createdAt,
+        });
+      }
+    }
+
+    productAccess.sort((a, b) => new Date(b.purchaseDate) - new Date(a.purchaseDate));
+    res.json({ productAccess });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+/**
+ * PATCH /api/admin/users/:id/access/:productId
+ * Update access expiry date for a specific product for a user.
+ */
+export async function updateProductAccess(req, res) {
+  try {
+    const userId = req.params.id;
+    const productId = req.params.productId;
+    const { expiresAt } = req.body;
+
+    if (!expiresAt) {
+      return res.status(400).json({ error: 'expiresAt date is required' });
+    }
+
+    const expiryDate = new Date(expiresAt);
+    if (isNaN(expiryDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format for expiresAt' });
+    }
+
+    const result = await Purchase.findOneAndUpdate(
+      {
+        userId,
+        status: 'paid',
+        'items.productId': new mongoose.Types.ObjectId(productId),
+      },
+      {
+        $set: { 'items.$.expiresAt': expiryDate },
+      },
+      { new: true }
+    ).lean();
+
+    if (!result) {
+      return res.status(404).json({ error: 'Product access not found for this user' });
+    }
+
+    const updatedItem = result.items.find(
+      item => item.productId.toString() === productId
+    );
+
+    res.json({
+      ok: true,
+      productId,
+      expiresAt: updatedItem.expiresAt,
+      message: 'Access updated successfully',
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+/**
  * GET /api/admin/students/:id/progress
  * Admin view of a student's video watch progress.
  */
@@ -565,6 +658,57 @@ export async function getStudentProgress(req, res) {
 
     const totalSeconds = progress.reduce((sum, p) => sum + (p.watchedSeconds || 0), 0)
     res.json({ progress, totalSeconds })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+}
+
+/**
+ * GET /api/admin/students/:id/device-info
+ * Admin view of a student's current device info and last login
+ */
+export async function getStudentDeviceInfo(req, res) {
+  try {
+    const user = await User.findById(req.params.id).lean()
+    if (!user) {
+      return res.status(404).json({ error: 'Student not found' })
+    }
+
+    res.json({
+      id: user._id,
+      name: user.name || 'N/A',
+      email: user.email,
+      phoneNumber: user.phoneNumber,
+      activeSession: user.activeSession || null,
+      lastLoginTime: user.activeSession?.lastLoginTime || null
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+}
+
+/**
+ * GET /api/admin/students
+ * Get all students with their device info and last login
+ */
+export async function getAllStudentsWithDeviceInfo(req, res) {
+  try {
+    const students = await User.find({ isAdmin: false })
+      .select('name email phoneNumber activeSession')
+      .lean()
+
+    const studentsWithInfo = students.map(s => ({
+      id: s._id,
+      name: s.name || 'N/A',
+      email: s.email,
+      phoneNumber: s.phoneNumber,
+      deviceName: s.activeSession?.deviceName || 'Not logged in',
+      deviceType: s.activeSession?.deviceType || '-',
+      lastLoginTime: s.activeSession?.lastLoginTime || null,
+      ip: s.activeSession?.ip || '-'
+    }))
+
+    res.json(studentsWithInfo)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

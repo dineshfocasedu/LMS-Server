@@ -890,6 +890,70 @@ export async function getStreamUrl(req, res) {
   res.json({ url: `${baseUrl}/api/purchase/stream/${content._id}/${streamToken}` })
 }
 
+// GET /api/purchase/answer-url/:contentId  — returns a short-lived proxy URL for the answer PDF
+export async function getAnswerUrl(req, res) {
+  const content = await Content.findById(req.params.contentId)
+    .select('answerStoragePath isActive productId productIds')
+  if (!content || !content.isActive) return res.status(404).json({ error: 'Content not found' })
+  if (!content.answerStoragePath)    return res.status(404).json({ error: 'No answer PDF for this item' })
+
+  // Same access check as getStreamUrl
+  const allProductIds = [
+    ...(content.productIds || []),
+    ...(content.productId ? [content.productId] : []),
+  ]
+  if (allProductIds.length > 0) {
+    const products = await Product.find({
+      _id: { $in: allProductIds }, 'grants.courses.0': { $exists: true },
+    }).select('grants').lean()
+    if (products.length > 0) {
+      const userCourses = enrolledCourses(req.user)
+      let hasAccess = false
+      for (const product of products) {
+        if (product.grants.courses.some(c => userCourses.includes(c))) { hasAccess = true; break }
+        const hasByPurchase = await Purchase.exists({ userId: req.user._id, status: 'paid', 'items.productId': product._id })
+        if (hasByPurchase) { hasAccess = true; break }
+      }
+      if (!hasAccess) return res.status(403).json({ error: 'Access denied' })
+    }
+  }
+
+  // Token keyed with 'ans_' prefix so it can't be reused for the main stream endpoint
+  const streamToken = _createStreamToken(req.user._id.toString(), `ans_${content._id.toString()}`)
+  const baseUrl = process.env.SERVER_URL || `${req.protocol}://${req.get('host')}`
+  res.json({ url: `${baseUrl}/api/purchase/answer/${content._id}/${streamToken}` })
+}
+
+// GET /api/purchase/answer/:contentId/:token  — proxies answer PDF bytes (no auth middleware)
+export async function streamAnswer(req, res) {
+  if (!_verifyStreamToken(req.params.token, `ans_${req.params.contentId}`)) {
+    return res.status(401).json({ error: 'Invalid or expired token' })
+  }
+  const content = await Content.findById(req.params.contentId).select('answerStoragePath isActive')
+  if (!content || !content.isActive || !content.answerStoragePath) {
+    return res.status(404).json({ error: 'Not found' })
+  }
+  if (!BUNNY_API_KEY || !BUNNY_ZONE) {
+    return res.status(503).json({ error: 'Storage not configured' })
+  }
+  try {
+    const upstream = await axios({
+      method: 'GET',
+      url: `${BUNNY_ENDPOINT}/${BUNNY_ZONE}/${content.answerStoragePath}`,
+      headers: { AccessKey: BUNNY_API_KEY },
+      responseType: 'stream',
+      validateStatus: () => true,
+    })
+    res.status(upstream.status)
+    res.set('Content-Type', 'application/pdf')
+    res.set('Cache-Control', 'private, max-age=3600')
+    if (upstream.headers['content-length']) res.set('Content-Length', upstream.headers['content-length'])
+    upstream.data.pipe(res)
+  } catch {
+    res.status(502).json({ error: 'Failed to stream answer PDF' })
+  }
+}
+
 // Pre-signed path tokens — access checked once in getStreamUrl (auth-gated), token stored
 // server-side so the browser can use the URL directly as <video src> without custom headers.
 // Token sits in the URL PATH (not query param) so reverse proxies never strip it.
@@ -1060,7 +1124,7 @@ export async function getPublicContent(req, res) {
       status: { $ne: 'processing' },
       $or: accessOr,
     }).sort({ order: 1, createdAt: 1 })
-      .select('title description type subject url size order createdAt category folder testSeriesType')
+      .select('title description type subject url size order createdAt category folder testSeriesType answerSize')
       .lean()
     _contentCache.set(productId, { data: dbItems, expiresAt: Date.now() + _CONTENT_CACHE_TTL })
     const items = subject ? dbItems.filter(c => c.subject === subject) : dbItems
@@ -1072,7 +1136,7 @@ export async function getPublicContent(req, res) {
   if (subject) filter.subject = subject
   const items = await Content.find(filter)
     .sort({ order: 1, createdAt: 1 })
-    .select('title description type subject url size order createdAt category folder testSeriesType')
+    .select('title description type subject url size order createdAt category folder testSeriesType answerSize')
     .lean()
   res.json({ content: items })
 }

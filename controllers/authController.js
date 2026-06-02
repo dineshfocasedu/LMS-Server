@@ -3,6 +3,7 @@ import User from "../models/User.js"
 import { generateToken, clearUserCache } from "../middleware/auth.js";
 import {generateOTP, sendOTP, sendEmailOTP} from "../services/otpService.js"
 import { normalizePhone } from "../services/accessService.js"
+import { getDeviceInfo } from "../services/deviceService.js"
 
 // Send OTP (for login/register)
 const sendOTPController = async (req, res) => {
@@ -52,7 +53,7 @@ const sendOTPController = async (req, res) => {
 // Verify OTP and login
 const verifyOTPController = async (req, res) => {
   try {
-    const { phoneNumber: rawPhone, email, otp } = req.body;
+    const { phoneNumber: rawPhone, email, otp, forceLogin } = req.body;
     const phoneNumber = normalizePhone(rawPhone);
     const identifier = phoneNumber || email;
 
@@ -79,10 +80,53 @@ const verifyOTPController = async (req, res) => {
       return res.status(400).json({ error: 'OTP expired' });
     }
 
+    // Get current device info
+    const deviceInfo = getDeviceInfo(req);
+
+    // Check if user is admin (can login from multiple devices)
+    const isDifferentDevice = user.activeSession?.deviceFingerprint &&
+                             user.activeSession.deviceFingerprint !== deviceInfo.deviceFingerprint &&
+                             !user.isAdmin;
+
+    console.log('[Device Check]', {
+      userId: user._id,
+      isAdmin: user.isAdmin,
+      hasActiveSession: !!user.activeSession,
+      currentFingerprint: deviceInfo.deviceFingerprint.substring(0, 16) + '...',
+      storedFingerprint: user.activeSession?.deviceFingerprint?.substring(0, 16) + '...',
+      isDifferentDevice,
+      forceLogin
+    });
+
+    if (isDifferentDevice && !forceLogin) {
+      console.log('[Device Conflict Detected] Returning confirmation request');
+      return res.status(200).json({
+        success: false,
+        requiresDeviceConfirmation: true,
+        message: 'You are already logged in on another device',
+        oldDevice: {
+          deviceName: user.activeSession.deviceName,
+          deviceType: user.activeSession.deviceType,
+          lastLoginTime: user.activeSession.lastLoginTime
+        }
+      });
+    }
+
     // Clear OTP
     user.otp = null;
     user.otpExpires = null;
+
+    // Update active session (only store current device, not history)
+    user.activeSession = {
+      deviceFingerprint: deviceInfo.deviceFingerprint,
+      deviceName: deviceInfo.deviceName,
+      deviceType: deviceInfo.deviceType,
+      lastLoginTime: new Date(),
+      ip: deviceInfo.ip
+    };
+
     await user.save();
+    clearUserCache(user._id);
 
     // Generate token
     const token = generateToken(user._id);
@@ -99,6 +143,35 @@ const verifyOTPController = async (req, res) => {
         access: user.access
       }
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Logout from other device (called when user wants to login from new device)
+const logoutOtherDeviceController = async (req, res) => {
+  try {
+    const { phoneNumber: rawPhone, email } = req.body;
+    const phoneNumber = normalizePhone(rawPhone);
+    const identifier = phoneNumber || email;
+
+    if (!identifier) {
+      return res.status(400).json({ error: 'Phone or email required' });
+    }
+
+    const isEmail = !!email;
+    const query = isEmail ? { email: email.toLowerCase() } : { phoneNumber };
+
+    const user = await User.findOne(query);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    user.activeSession = null;
+    await user.save();
+    clearUserCache(user._id);
+
+    res.json({ success: true, message: 'Logged out from other device' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -148,4 +221,4 @@ const updateProfile = async (req, res) => {
   }
 };
 
-export { sendOTPController, verifyOTPController, getMe, updateProfile }
+export { sendOTPController, verifyOTPController, logoutOtherDeviceController, getMe, updateProfile }

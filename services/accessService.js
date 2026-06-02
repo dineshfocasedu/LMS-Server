@@ -122,13 +122,19 @@ export async function updateUserAccess(userId) {
 export async function recordPurchase({ userId, products, source, orderId, currency, address, fulfillmentStatus, customerName, customerPhone }) {
   // products: [{ productId, name, amount, shipToHome? }]
   const productList = Array.isArray(products) ? products : [products];
+  const defaultValidityDays = parseInt(process.env.DEFAULT_ACCESS_VALIDITY || '180', 10);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + defaultValidityDays * 24 * 60 * 60 * 1000);
+
   const items = productList.map(p => ({
     productId: p.productId,
     name: p.name,
     amount: p.amount,
     category: p.category,
     subCategory: p.subCategory,
-    level: p.level
+    level: p.level,
+    grantedAt: now,
+    expiresAt: expiresAt,
   }));
 
   const hasPhysicalItem = productList.some(p => p.shipToHome === true);

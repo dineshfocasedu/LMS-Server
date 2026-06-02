@@ -343,3 +343,59 @@ export async function getProgress(req, res) {
     res.status(500).json({ error: err.message })
   }
 }
+
+/**
+ * GET /api/purchase/check-access/:productId (auth required)
+ * Check if the current user has valid (non-expired) access to a product.
+ */
+export async function checkProductAccess(req, res) {
+  try {
+    const userId = req.user._id;
+    const productId = req.params.productId;
+
+    if (!productId) {
+      return res.status(400).json({ error: 'productId parameter is required' });
+    }
+
+    const now = new Date();
+    const purchase = await Purchase.findOne({
+      userId,
+      status: 'paid',
+      'items.productId': new (await import('mongoose')).default.Types.ObjectId(productId),
+    }).lean();
+
+    if (!purchase) {
+      return res.json({
+        hasAccess: false,
+        message: 'Product not purchased',
+      });
+    }
+
+    const item = purchase.items.find(
+      i => i.productId?.toString() === productId
+    );
+
+    if (!item) {
+      return res.json({
+        hasAccess: false,
+        message: 'Product not found in purchases',
+      });
+    }
+
+    const isExpired = item.expiresAt && item.expiresAt < now;
+    const daysRemaining = item.expiresAt
+      ? Math.ceil((item.expiresAt - now) / (24 * 60 * 60 * 1000))
+      : null;
+
+    res.json({
+      hasAccess: !isExpired,
+      isExpired,
+      grantedAt: item.grantedAt,
+      expiresAt: item.expiresAt,
+      daysRemaining,
+      message: isExpired ? 'Access has expired' : 'Access is valid',
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}

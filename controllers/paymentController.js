@@ -8,7 +8,7 @@ import InventoryLog from "../models/InventoryLog.js";
 import AccountsEntry from "../models/AccountsEntry.js";
 import Settings from "../models/Settings.js";
 import { sendLowStockAlert, sendOrderWelcome } from "../services/watiService.js";
-import { normalizePhone } from "../services/accessService.js";
+import { normalizePhone, updateUserAccess } from "../services/accessService.js";
 
 const WELCOME_TEMPLATE = process.env.WELCOME_TEMPLATE_NAME || 'order_welcome';
 
@@ -148,13 +148,21 @@ async function decrementInventory(products, orderId) {
 }
 
 // Create a Purchase record (source='custom') so this sale appears in sales/orders views.
+// Sets access validity period (6 months by default).
 // Idempotent: skips silently if the record already exists.
 async function createCustomPurchase(userId, payment) {
   try {
+    // Calculate access validity period
+    const defaultValidityDays = parseInt(process.env.DEFAULT_ACCESS_VALIDITY || '180', 10);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + defaultValidityDays * 24 * 60 * 60 * 1000);
+
     const items = payment.products.map((p) => ({
       productId: p.product_id || undefined,
       name:      p.name,
       amount:    p.price,
+      grantedAt: now,      // Access granted at purchase time
+      expiresAt: expiresAt,  // Access expires 6 months later
     }));
 
     const purchaseData = {
@@ -636,6 +644,9 @@ export async function razorpayWebhook(req, res) {
 
           // Create Purchase record so this sale appears in orders/sales views
           await createCustomPurchase(user._id, updated);
+
+          // Update user.access field with courses/features from products
+          await updateUserAccess(user._id);
 
           // Decrement stock for inventory-tracked products
           await decrementInventory(updated.products, updated._id);

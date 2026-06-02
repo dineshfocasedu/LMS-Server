@@ -13,11 +13,19 @@ const userSchema = new mongoose.Schema({
     shopify: { courses: [String], features: [String] },
     website: { courses: [String], features: [String] },
     combo:   { courses: [String], features: [String] },
+  },
+  activeSession: {
+    deviceFingerprint: String,
+    deviceName: String,
+    deviceType: String,
+    lastLoginTime: Date,
+    ip: String,
   }
 }, { timestamps: true });
 
 userSchema.index({ shopifyId: 1 }, { sparse: true });
 userSchema.index({ createdAt: -1 });
+userSchema.index({ 'activeSession.deviceFingerprint': 1 }, { sparse: true });
 
 const User = mongoose.model('User', userSchema);
 

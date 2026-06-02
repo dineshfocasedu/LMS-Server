@@ -1,6 +1,7 @@
 // middleware/auth.js
 import jwt from "jsonwebtoken"
 import User from "../models/User.js"
+import { getDeviceInfo } from "../services/deviceService.js"
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error('JWT_SECRET environment variable is required');
@@ -74,4 +75,56 @@ const adminAuth = async (req, res, next) => {
   }
 };
 
-export { auth, adminAuth, generateToken }
+// Verify JWT + validate device matches activeSession
+const deviceAuth = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'No token' });
+
+    const { userId } = jwt.verify(token, JWT_SECRET);
+    const user = await _resolveUser(userId);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    // Admins can login from any device - skip device validation
+    if (user.isAdmin) {
+      req.user = user;
+      return next();
+    }
+
+    // For regular users, validate device matches activeSession
+    if (!user.activeSession) {
+      return res.status(401).json({ error: 'User logged out from this device' });
+    }
+
+    const currentDevice = getDeviceInfo(req);
+    if (currentDevice.deviceFingerprint !== user.activeSession.deviceFingerprint) {
+      console.log('[Device Mismatch] User logged in from different device');
+      return res.status(401).json({ error: 'You have been logged out - login from another device' });
+    }
+
+    // Cost optimization: Only update lastLoginTime if older than 30 minutes
+    const lastLoginTime = new Date(user.activeSession.lastLoginTime);
+    const timeSinceLastLogin = Date.now() - lastLoginTime.getTime();
+    const THIRTY_MINUTES = 30 * 60 * 1000;
+
+    if (timeSinceLastLogin > THIRTY_MINUTES) {
+      try {
+        await User.updateOne(
+          { _id: user._id },
+          { 'activeSession.lastLoginTime': new Date() }
+        );
+        clearUserCache(user._id);
+      } catch (err) {
+        console.error('[Update LastLoginTime Error]', err.message);
+        // Continue anyway - don't block request if update fails
+      }
+    }
+
+    req.user = user;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+export { auth, adminAuth, deviceAuth, generateToken }

@@ -26,7 +26,10 @@ const purchaseSchema = new mongoose.Schema({
       amount: Number,
       category: String,
       subCategory: String,
-      level: String
+      level: String,
+      // Access validity tracking per product
+      grantedAt: { type: Date, default: Date.now },
+      expiresAt: Date,  // When access to this product expires
     }
   ],
 

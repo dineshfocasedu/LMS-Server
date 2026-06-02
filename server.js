@@ -21,6 +21,11 @@ app.set('trust proxy', 1);
 app.use(cors({
   origin: [
     "http://localhost:8080",
+    "https://app.focasedu.com",,
+    "https://admin.focasedu.com",
+    "https://lms.focasedu.com",
+    "https://shop.focasedu.com",
+    "https://store.focasedu.com",
     "http://localhost:3000",
     "http://localhost:5173",
     "http://localhost:5174",
@@ -41,11 +46,7 @@ app.use(cors({
     "https://focas-admin-lms-app.vercel.app",
     "https://focas-custom-product-app.vercel.app",
     "https://compile-wrongly-deceiver.ngrok-free.dev",
-    "https://focasedu.com",
-    "https://lms-student-focas.vercel.app",
-    "https://lms-server-zeta-three.vercel.app",
-    "https://lms-admin-focastech.vercel.app",
-    "lms-student-dpc0q5m16-focas.vercel.app"
+    "https://focasedu.com"
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
