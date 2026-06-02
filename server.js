@@ -23,6 +23,7 @@ app.use(cors({
     "http://localhost:8080",
     "https://lms-student-focas.vercel.app",
     "https://lms-admin-focastech.vercel.app",
+    "https://lms-accounts-admin.vercel.app",
     "https://app.focasedu.com",,
     "https://admin.focasedu.com",
     "https://lms.focasedu.com",
