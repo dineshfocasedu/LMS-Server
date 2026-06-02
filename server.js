@@ -1,4 +1,3 @@
-// server.js
 import 'dotenv/config'
 import express from "express"
 import mongoose from "mongoose"
@@ -14,64 +13,69 @@ import accountsRoutes from "./routes/accounts.js"
 
 const app = express();
 
-// Trust reverse proxies (ngrok, nginx, Heroku, etc.) so req.protocol is https when it should be
+// Trust reverse proxies (ngrok, nginx, Heroku, etc.)
 app.set('trust proxy', 1);
 
-// Middleware
-app.use(cors({
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+// Define ONE shared config object — used by both app.use() and app.options()
+// so preflight (OPTIONS) and actual requests get identical headers.
+const corsOptions = {
   origin: [
     "http://localhost:8080",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    // Vercel
     "https://lms-student-focas.vercel.app",
     "https://lms-admin-focastech.vercel.app",
     "https://lms-accounts-admin.vercel.app",
     "https://lms-accounts-admin-git-main-focas.vercel.app",
     "https://lms-accounts-admin-n6599kmnq-focas.vercel.app",
+    "https://focas.vercel.app",
+    "https://focas-student-lms-app.vercel.app",
+    "https://focas-admin-app.vercel.app",
+    "https://focas-admin-lms-app.vercel.app",
+    "https://focas-custom-product-app.vercel.app",
+    // Netlify
+    "https://admin-focas.netlify.app",
+    "https://combo-focas.netlify.app",
+    "https://sage-douhua-668f0c.netlify.app",
+    "https://extraordinary-mousse-64157e.netlify.app",
+    "https://focaslms.netlify.app",
+    "https://focasadmin.netlify.app",
+    // Production
+    "https://focasedu.com",
     "https://app.focasedu.com",
     "https://admin.focasedu.com",
     "https://lms.focasedu.com",
     "https://shop.focasedu.com",
     "https://store.focasedu.com",
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://localhost:5175",
-    "https://admin-focas.netlify.app",
-    "https://combo-focas.netlify.app",
-    "https://focas.vercel.app",
-    "https://sage-douhua-668f0c.netlify.app",
-    "https://extraordinary-mousse-64157e.netlify.app",
+    // ngrok
     "https://estimate-pampers-collector.ngrok-free.dev",
     "https://september-subsphenoid-celia.ngrok-free.dev",
-    "https://focaslms.netlify.app",
     "https://carole-accommodative-rogelio.ngrok-free.dev",
-    "https://focasadmin.netlify.app",
-    "https://lms.focasedu.com",
-    "https://focas-student-lms-app.vercel.app",
-    "https://focas-admin-app.vercel.app",
-    "https://focas-admin-lms-app.vercel.app",
-    "https://focas-custom-product-app.vercel.app",
     "https://compile-wrongly-deceiver.ngrok-free.dev",
-    "https://focasedu.com"
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
   exposedHeaders: ["Content-Range", "Accept-Ranges", "Content-Length"],
-  credentials: true
-}));
+  credentials: true,
+};
 
-// ✅ Handle preflight requests for ALL routes
-app.options('*', cors());
+// Preflight must be registered FIRST and use the same corsOptions
+app.options('*', cors(corsOptions));
+app.use(cors(corsOptions));
 
-
+// ─── Routes that need raw body (before express.json) ─────────────────────────
 app.use('/api/shopify', shopifyRoutes);
-// Payment routes must be mounted before express.json() so the Razorpay
-// webhook route can capture the raw body for HMAC signature verification.
 app.use('/api/payment', paymentRoutes);
 
-
+// ─── Body Parsing ─────────────────────────────────────────────────────────────
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Handle malformed JSON bodies (e.g. bad webhook payloads)
+// Malformed JSON handler
 app.use((err, _req, res, next) => {
   if (err.type === 'entity.parse.failed') {
     return res.status(400).json({ error: 'Invalid JSON body' });
@@ -79,25 +83,25 @@ app.use((err, _req, res, next) => {
   next(err);
 });
 
-// Database
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/focas')
+// ─── Database ─────────────────────────────────────────────────────────────────
+mongoose
+  .connect(process.env.MONGO_URI || 'mongodb://localhost:27017/focas')
   .then(() => {
     console.log('✅ MongoDB Connected');
     resumeProcessingPolls();
   })
   .catch(err => console.error('❌ MongoDB Error:', err));
 
-// Routes
-app.use('/api/auth', authRoutes);
-
+// ─── Routes ───────────────────────────────────────────────────────────────────
+app.use('/api/auth',     authRoutes);
 app.use('/api/purchase', purchaseRoutes);
-app.use('/api/admin', adminRoutes);
+app.use('/api/admin',    adminRoutes);
 app.use('/api/delivery', deliveryRoutes);
 app.use('/api/accounts', accountsRoutes);
 
-// Health check
-app.get('/health', (req, res) => res.json({ status: 'ok Health Success done' }));
+// ─── Health Check ─────────────────────────────────────────────────────────────
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
-// Start server
+// ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
