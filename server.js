@@ -85,7 +85,12 @@ app.use((err, _req, res, next) => {
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 mongoose
-  .connect(process.env.MONGO_URI || 'mongodb://localhost:27017/focas')
+  .connect(process.env.MONGO_URI || 'mongodb://localhost:27017/focas', {
+    serverSelectionTimeoutMS: 30000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 5,
+    minPoolSize: 1,
+  })
   .then(() => {
     console.log('✅ MongoDB Connected');
     resumeProcessingPolls();
